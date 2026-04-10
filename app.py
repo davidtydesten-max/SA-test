@@ -157,7 +157,7 @@ if new_signals:
     except Exception as e:
         logger.error(f"Supabase save error: {e}")
     
-    return len(new_signals)
+   return len(new_signals)
 
 def process_and_add_job(job, url, source_name, signal_list, seen_set):
     title = job.get("title", "Unknown Role")
