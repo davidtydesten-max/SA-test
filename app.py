@@ -103,8 +103,7 @@ def scrape_jobs():
     except Exception as e:
         logger.warning(f"Could not fetch existing URLs: {e}")
 
-    for query in SEARCH_QUERIES:
-for query in SEARCH_QUERIES:
+or query in SEARCH_QUERIES:
         # --- ENGINE 1: GOOGLE JOBS (Token-based) ---
         try:
             token = None
