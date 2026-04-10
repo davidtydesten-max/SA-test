@@ -149,12 +149,13 @@ def scrape_jobs():
         except Exception as e:
             logger.error(f"Indeed error: {e}")
 
-    if new_signals:
-        try:
-            supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
-            logger.info(f"Saved {len(new_signals)} signals total.")
-        except Exception as e:
-            logger.error(f"Supabase save error: {e}")
+if new_signals:
+    try:
+        # The on_conflict="source_url" is the key to stopping duplicates
+        supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
+        logger.info(f"Saved {len(new_signals)} signals total.")
+    except Exception as e:
+        logger.error(f"Supabase save error: {e}")
     
     return len(new_signals)
 
