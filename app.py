@@ -98,21 +98,32 @@ def scrape_jobs():
 
     for query in SEARCH_QUERIES:
         try:
-            params = {
-                "engine": "google_jobs",
-                "q": query,
-                "api_key": SERPAPI_KEY,
-                "num": 50,
-                "country": "us",
-            }
-            search = GoogleSearch(params)
-            results = search.get_dict()
-            jobs = results.get("jobs_results", [])
-            logger.info(f"Query '{query}': {len(jobs)} results")
+            all_query_jobs = []
+            # Loop through 5 pages of 10 results each
+            for page in range(5):
+                params = {
+                    "engine": "google_jobs",
+                    "q": query,
+                    "api_key": SERPAPI_KEY,
+                    "start": page * 10,  # This tells Google to skip to the next 10
+                    "country": "us",
+                }
+                search = GoogleSearch(params)
+                results = search.get_dict()
+                page_jobs = results.get("jobs_results", [])
+                
+                if not page_jobs:
+                    break
+                
+                all_query_jobs.extend(page_jobs)
+                # Small sleep to respect API limits between pages
+                time.sleep(0.5)
 
-            for job in jobs:
+            logger.info(f"Query '{query}': {len(all_query_jobs)} total results found")
+
+            for job in all_query_jobs:
                 url = job.get("share_link") or job.get("related_links", [{}])[0].get("link", "")
-                if url in seen_urls:
+                if not url or url in seen_urls:
                     continue
                 seen_urls.add(url)
 
@@ -149,8 +160,6 @@ def scrape_jobs():
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
                 new_signals.append(signal)
-
-            time.sleep(1)
 
         except Exception as e:
             logger.error(f"Error on query '{query}': {e}")
