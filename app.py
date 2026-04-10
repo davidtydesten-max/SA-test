@@ -35,153 +35,89 @@ SEARCH_QUERIES = [
     "OneStream finance transformation jobs",
 ]
 
-INDUSTRY_MAP = {
-    "bank": "Financial Services", "financial": "Financial Services", "insurance": "Insurance",
-    "capital": "Financial Services", "investment": "Financial Services", "asset": "Financial Services",
-    "pharma": "Life Sciences", "biotech": "Life Sciences", "health": "Healthcare",
-    "medical": "Healthcare", "hospital": "Healthcare", "clinical": "Life Sciences",
-    "manufactur": "Manufacturing", "industrial": "Manufacturing", "tech": "Technology", 
-    "software": "Technology", "digital": "Technology", "retail": "Retail", 
-    "consult": "Professional Services", "advisory": "Professional Services",
-}
-
-REGION_MAP = {
-    "new york": "New York", "ny ": "New York", ", ny": "New York", "nyc": "New York",
-    "new jersey": "New Jersey", "nj ": "New Jersey", ", nj": "New Jersey",
-    "connecticut": "Connecticut", ", ct": "Connecticut", "ct ": "Connecticut",
-    "pennsylvania": "Pennsylvania", ", pa": "Pennsylvania", "remote": "Remote / National",
-}
-
-def detect_industry(text):
-    text_lower = text.lower()
-    for keyword, industry in INDUSTRY_MAP.items():
-        if keyword in text_lower:
-            return industry
-    return "Enterprise"
-
-def detect_region(text):
-    text_lower = text.lower()
-    for keyword, region in REGION_MAP.items():
-        if keyword in text_lower:
-            return region
-    return "National"
-
-def extract_company(result):
-    return result.get("company_name") or result.get("detected_extensions", {}).get("company", "Unknown")
+def parse_relative_date(text):
+    """Converts '3 days ago' or '2 weeks ago' into a real date."""
+    now = datetime.now(timezone.utc)
+    if not text: return now.isoformat()
+    text = text.lower()
+    
+    number = re.search(r'(\d+)', text)
+    count = int(number.group(1)) if number else 1
+    
+    if 'hour' in text: return (now - timedelta(hours=count)).isoformat()
+    if 'day' in text: return (now - timedelta(days=count)).isoformat()
+    if 'week' in text: return (now - timedelta(weeks=count)).isoformat()
+    if 'month' in text: return (now - timedelta(days=count*30)).isoformat()
+    return now.isoformat()
 
 def process_and_add_job(job, url, source_name, signal_list, seen_set):
     clean_url = url.split('?')[0].split('#')[0].strip()
     title = job.get("title", "Unknown Role").strip()
     company = job.get("company_name", "Unknown").strip()
     
-    if clean_url in seen_set:
-        return
+    if clean_url in seen_set: return
 
-    for existing in signal_list:
-        if (existing['company'].lower() == company.lower() and 
-            existing['job_title'].lower() == title.lower()):
-            return 
-
-    location = job.get("location", "Remote/USA")
-    description = job.get("description", "")[:500]
-    full_text = f"{title} {company} {description}"
+    # Extract Posted Date
+    raw_date = job.get("detected_extensions", {}).get("posted_at") or job.get("date")
+    posted_at = parse_relative_date(raw_date) if raw_date else datetime.now(timezone.utc).isoformat()
 
     signal_list.append({
         "company": company,
         "job_title": title,
-        "industry": detect_industry(full_text),
-        "region": detect_region(location + " " + full_text),
+        "industry": "Enterprise",
+        "region": "National",
         "signal_type": "role",
         "detail": f"{title} at {company} ({source_name}).",
         "source_url": clean_url,
         "source": source_name,
-        "location": location,
+        "location": job.get("location", "USA"),
+        "posted_at": posted_at, # This is the REAL job date
         "updated_at": datetime.now(timezone.utc).isoformat(),
     })
     seen_set.add(clean_url)
 
 def scrape_jobs():
     logger.info("Starting master scrape...")
-    try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-        supabase.table("signals").delete().lt("created_at", cutoff).execute()
-    except Exception as e:
-        logger.error(f"Cleanup error: {e}")
-
     new_signals = []
     seen_urls = set()
 
     try:
         existing = supabase.table("signals").select("source_url").limit(5000).execute()
         seen_urls = {r["source_url"] for r in existing.data if r.get("source_url")}
-    except Exception as e:
-        logger.warning(f"Database sync warning: {e}")
+    except: pass
 
     for query in SEARCH_QUERIES:
         # 1. Google Jobs
         try:
-            search = GoogleSearch({
-                "engine": "google_jobs",
-                "q": query,
-                "api_key": SERPAPI_KEY,
-                "hl": "en",
-                "gl": "us"
-            })
+            search = GoogleSearch({"engine": "google_jobs", "q": query, "api_key": SERPAPI_KEY, "hl": "en", "gl": "us"})
             results = search.get_dict()
             for job in results.get("jobs_results", []):
                 url = job.get("related_links", [{}])[0].get("link") or job.get("share_link")
-                if url:
-                    process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
-        except Exception as e:
-            logger.error(f"Google Jobs error: {e}")
+                if url: process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
+        except: pass
 
-        # 2. Organic (Indeed/HiringCafe) with smarter company extraction
-        special_queries = [f"OneStream jobs on Indeed", f"OneStream hiring.cafe listings"]
-        for sq in special_queries:
-            try:
-                search = GoogleSearch({
-                    "engine": "google",
-                    "q": sq,
-                    "api_key": SERPAPI_KEY,
-                    "gl": "us"
-                })
-                results = search.get_dict()
-                for result in results.get("organic_results", []):
-                    url = result.get("link")
+        # 2. Organic (Indeed/HiringCafe)
+        try:
+            search = GoogleSearch({"engine": "google", "q": f"OneStream jobs on Indeed or hiring.cafe", "api_key": SERPAPI_KEY, "gl": "us"})
+            results = search.get_dict()
+            for result in results.get("organic_results", []):
+                url = result.get("link")
+                if "indeed.com" in url or "hiring.cafe" in url:
                     snippet = result.get("snippet", "")
-                    title = result.get("title", "")
-                    
-                    source = None
-                    if "indeed.com" in url: source = "Indeed"
-                    elif "hiring.cafe" in url: source = "HiringCafe"
-                    
-                    if source:
-                        # Attempting to find company name in the snippet (e.g., "at SystemsAccountants")
-                        company_match = re.search(r"(?:at|by|from)\s+([A-Z][\w\s&]+?)(?:\.|\s\d|\sin\s|\|)", snippet)
-                        extracted_company = company_match.group(1).strip() if company_match else "View Listing"
-                        
-                        job = {
-                            "title": title.split(" | ")[0].split(" - ")[0],
-                            "company_name": extracted_company,
-                            "location": "USA",
-                            "description": snippet
-                        }
-                        process_and_add_job(job, url, source, new_signals, seen_urls)
-            except Exception as e:
-                logger.error(f"Organic error: {e}")
+                    job = {
+                        "title": result.get("title", "").split(" - ")[0],
+                        "company_name": (re.search(r"(?:at|by|from)\s+([A-Z][\w\s&]+)", snippet) or [None, "View Listing"])[1],
+                        "date": re.search(r"(\d+\s\w+\sago)", snippet).group(1) if re.search(r"(\d+\s\w+\sago)", snippet) else "1 day ago",
+                        "location": "USA",
+                        "description": snippet
+                    }
+                    process_and_add_job(job, url, "Indeed/HiringCafe", new_signals, seen_urls)
+        except: pass
         time.sleep(1)
 
     if new_signals:
-        try:
-            supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
-            logger.info(f"Saved {len(new_signals)} leads.")
-        except Exception as e:
-            logger.error(f"Save error: {e}")
+        supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
     return len(new_signals)
-
-@app.route("/", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "message": "Visit /dashboard"})
 
 @app.route("/dashboard")
 def dashboard():
@@ -189,76 +125,61 @@ def dashboard():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>SA Intelligence Dashboard</title>
+        <title>SA Intelligence</title>
         <style>
-            body { font-family: -apple-system, sans-serif; line-height: 1.6; padding: 20px; background: #f4f7f6; color: #333; }
-            .container { max-width: 1100px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
-            header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #f0f0f0; margin-bottom: 25px; padding-bottom: 15px; }
-            button { background: #0066ff; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: 600; }
-            button:disabled { background: #aab; }
+            body { font-family: -apple-system, sans-serif; padding: 20px; background: #f4f7f6; }
+            .container { max-width: 1100px; margin: auto; background: white; padding: 25px; border-radius: 12px; }
+            header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+            button { background: #0066ff; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; }
             table { width: 100%; border-collapse: collapse; }
-            th { text-align: left; padding: 15px; background: #fafafa; border-bottom: 2px solid #eee; }
-            td { padding: 15px; border-bottom: 1px solid #eee; }
-            .source-tag { background: #eff6ff; color: #1e40af; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; border: 1px solid #dbeafe; text-transform: uppercase; }
-            a { color: #0066ff; text-decoration: none; font-weight: 500; }
+            th, td { text-align: left; padding: 12px; border-bottom: 1px solid #eee; }
+            .date-tag { color: #666; font-size: 12px; font-weight: bold; }
         </style>
     </head>
     <body>
         <div class="container">
             <header>
-                <h1>OneStream & EPM Intelligence</h1>
-                <button id="refresh-btn" onclick="refreshSignals()">Refresh Signals</button>
+                <h1>OneStream Leads (Sorted by Freshness)</h1>
+                <button onclick="refreshSignals()" id="btn">Refresh Signals</button>
             </header>
             <table>
                 <thead>
-                    <tr>
-                        <th>Company</th>
-                        <th>Job Role</th>
-                        <th>Region</th>
-                        <th>Source</th>
-                    </tr>
+                    <tr><th>Posted</th><th>Company</th><th>Role</th><th>Source</th></tr>
                 </thead>
-                <tbody id="signals-body"></tbody>
+                <tbody id="list"></tbody>
             </table>
         </div>
         <script>
-            async function loadSignals() {
-                const response = await fetch('/signals');
-                const data = await response.json();
-                const body = document.getElementById('signals-body');
-                body.innerHTML = '';
-                data.signals.forEach(sig => {
-                    body.innerHTML += `<tr>
-                        <td><strong>${sig.company}</strong></td>
-                        <td><a href="${sig.source_url}" target="_blank">${sig.job_title}</a></td>
-                        <td>${sig.region}</td>
-                        <td><span class="source-tag">${sig.source}</span></td>
-                    </tr>`;
-                });
+            async function load() {
+                const res = await fetch('/signals');
+                const data = await res.json();
+                document.getElementById('list').innerHTML = data.signals.map(s => `
+                    <tr>
+                        <td class="date-tag">${new Date(s.posted_at).toLocaleDateString()}</td>
+                        <td><strong>${s.company}</strong></td>
+                        <td><a href="${s.source_url}" target="_blank">${s.job_title}</a></td>
+                        <td>${s.source}</td>
+                    </tr>
+                `).join('');
             }
             async function refreshSignals() {
-                const btn = document.getElementById('refresh-btn');
-                btn.textContent = 'Scraping... Please Wait 30s';
-                btn.disabled = true;
-                await fetch('/refresh', { method: 'POST' });
-                setTimeout(async () => {
-                    await loadSignals();
-                    btn.textContent = 'Refresh Signals';
-                    btn.disabled = false;
-                }, 30000);
+                document.getElementById('btn').textContent = 'Scraping... wait 30s';
+                await fetch('/refresh', {method:'POST'});
+                setTimeout(() => { load(); document.getElementById('btn').textContent = 'Refresh Signals'; }, 30000);
             }
-            loadSignals();
+            load();
         </script>
     </body>
     </html>
     """)
 
-@app.route("/signals", methods=["GET"])
+@app.route("/signals")
 def get_signals():
-    result = supabase.table("signals").select("*").order("created_at", desc=True).limit(1000).execute()
+    # ORDER BY POSTED_AT (The real job date) instead of created_at (the scrape date)
+    result = supabase.table("signals").select("*").order("posted_at", desc=True).limit(500).execute()
     return jsonify({"signals": result.data})
 
-@app.route("/refresh", methods=["GET", "POST"])
+@app.route("/refresh", methods=["POST"])
 def manual_refresh():
     scheduler.add_job(scrape_jobs, 'date', run_date=datetime.now(timezone.utc))
     return jsonify({"status": "ok"})
@@ -268,5 +189,4 @@ scheduler.add_job(scrape_jobs, "cron", hour=7, minute=0, timezone="America/New_Y
 scheduler.start()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
