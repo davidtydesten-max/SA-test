@@ -185,7 +185,7 @@ def get_signals():
         result = supabase.table("signals") \
             .select("*") \
             .order("created_at", desc=True) \
-            .limit(200) \
+            .limit(1000) \
             .execute()
         return jsonify({"signals": result.data, "count": len(result.data)})
     except Exception as e:
