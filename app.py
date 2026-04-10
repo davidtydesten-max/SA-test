@@ -96,18 +96,17 @@ def scrape_jobs():
     new_signals = []
     seen_urls = set()
 
-    # 1. Fetch existing URLs to avoid duplicates
     try:
         existing = supabase.table("signals").select("source_url").execute()
         seen_urls = {r["source_url"] for r in existing.data if r.get("source_url")}
     except Exception as e:
         logger.warning(f"Could not fetch existing URLs: {e}")
 
-for query in SEARCH_QUERIES:
-        # --- ENGINE 1: GOOGLE JOBS (Token-based) ---
+    for query in SEARCH_QUERIES:
+        # --- ENGINE 1: GOOGLE JOBS ---
         try:
             token = None
-            for page in range(3):  # Fetch 3 pages per query
+            for page in range(3):
                 params = {
                     "engine": "google_jobs",
                     "q": query,
@@ -119,26 +118,21 @@ for query in SEARCH_QUERIES:
                 
                 search = GoogleSearch(params)
                 res_dict = search.get_dict()
-                
-                # Get the token for the NEXT page
                 token = res_dict.get("serpapi_pagination", {}).get("next_page_token")
                 jobs = res_dict.get("jobs_results", [])
                 
-                if not jobs:
-                    break
-                    
+                if not jobs: break
                 for job in jobs:
                     url = job.get("share_link") or job.get("related_links", [{}])[0].get("link", "")
                     if url and url not in seen_urls:
                         process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
-                
-                if not token: break # No more pages exist
+                if not token: break
         except Exception as e:
             logger.error(f"Google error: {e}")
 
-        # --- ENGINE 2: INDEED (Offset-based) ---
+        # --- ENGINE 2: INDEED ---
         try:
-            for page in range(2): # Getting 50 results (25 per page)
+            for page in range(2):
                 params = {
                     "engine": "indeed",
                     "q": query,
@@ -146,44 +140,25 @@ for query in SEARCH_QUERIES:
                     "start": page * 25,
                     "l": "United States"
                 }
-                search = GoogleSearch(params)
-                res_dict = search.get_dict()
-                jobs = res_dict.get("jobs_results", [])
-                
-                if not jobs:
-                    break
-                    
-                for job in jobs:
+                res = GoogleSearch(params).get_dict().get("jobs_results", [])
+                if not res: break
+                for job in res:
                     url = job.get("link")
                     if url and url not in seen_urls:
                         process_and_add_job(job, url, "Indeed", new_signals, seen_urls)
         except Exception as e:
             logger.error(f"Indeed error: {e}")
 
-        # --- ENGINE 3: HIRING CAFE (via Apify) ---
-        try:
-            run_input = { "searchQuery": query, "maxResults": 20 }
-            run = apify_client.actor("manojachari/hiring-cafe-scraper").call(run_input=run_input)
-            for job in apify_client.dataset(run["defaultDatasetId"]).iterate_items():
-                url = job.get("applyUrl") or job.get("url")
-                if url and url not in seen_urls:
-                    # Hiring Cafe has slightly different field names
-                    job['title'] = job.get('jobTitle', job.get('title'))
-                    job['company_name'] = job.get('companyName', job.get('company'))
-                    process_and_add_job(job, url, "Hiring Cafe", new_signals, seen_urls)
-        except Exception as e: logger.error(f"Hiring Cafe error: {e}")
-
-    # 3. Batch Save
     if new_signals:
         try:
             supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
             logger.info(f"Saved {len(new_signals)} signals total.")
-        except Exception as e: logger.error(f"Supabase save error: {e}")
+        except Exception as e:
+            logger.error(f"Supabase save error: {e}")
     
     return len(new_signals)
 
 def process_and_add_job(job, url, source_name, signal_list, seen_set):
-    """Helper to clean data and add to the list"""
     title = job.get("title", "Unknown Role")
     company = extract_company(job)
     location = job.get("location", "Remote/USA")
