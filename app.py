@@ -85,11 +85,18 @@ def detect_region(text):
 def extract_company(result):
     return result.get("company_name") or result.get("detected_extensions", {}).get("company", "Unknown")
 
+from apify_client import ApifyClient
+
+# Add this near your other OS gets
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN")
+apify_client = ApifyClient(APIFY_TOKEN)
+
 def scrape_jobs():
-    logger.info(f"Starting scrape at {datetime.now(timezone.utc)}")
+    logger.info(f"Starting multi-engine scrape at {datetime.now(timezone.utc)}")
     new_signals = []
     seen_urls = set()
 
+    # 1. Fetch existing URLs to avoid duplicates
     try:
         existing = supabase.table("signals").select("source_url").execute()
         seen_urls = {r["source_url"] for r in existing.data if r.get("source_url")}
@@ -97,85 +104,76 @@ def scrape_jobs():
         logger.warning(f"Could not fetch existing URLs: {e}")
 
     for query in SEARCH_QUERIES:
+        # --- ENGINE 1: GOOGLE JOBS (via SerpApi) ---
         try:
-            all_query_jobs = []
-            # Loop through 5 pages of 10 results each
-            for page in range(5):
-                params = {
-                    "engine": "google_jobs",
-                    "q": query,
-                    "api_key": SERPAPI_KEY,
-                    "start": page * 10,  # This tells Google to skip to the next 10
-                    "country": "us",
-                }
-                search = GoogleSearch(params)
-                results = search.get_dict()
-                page_jobs = results.get("jobs_results", [])
-                
-                if not page_jobs:
-                    break
-                
-                all_query_jobs.extend(page_jobs)
-                # Small sleep to respect API limits between pages
-                time.sleep(0.5)
+            for page in range(3): # Getting 30 results
+                params = {"engine": "google_jobs", "q": query, "api_key": SERPAPI_KEY, "start": page * 10, "country": "us"}
+                res = GoogleSearch(params).get_dict().get("jobs_results", [])
+                for job in res:
+                    url = job.get("share_link") or job.get("related_links", [{}])[0].get("link", "")
+                    if url and url not in seen_urls:
+                        process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
+                if not res: break
+        except Exception as e: logger.error(f"Google error: {e}")
 
-            logger.info(f"Query '{query}': {len(all_query_jobs)} total results found")
+        # --- ENGINE 2: INDEED (via SerpApi) ---
+        try:
+            for page in range(2): # Getting 50 results
+                params = {"engine": "indeed", "q": query, "api_key": SERPAPI_KEY, "start": page * 25, "l": "United States"}
+                res = GoogleSearch(params).get_dict().get("jobs_results", [])
+                for job in res:
+                    url = job.get("link")
+                    if url and url not in seen_urls:
+                        process_and_add_job(job, url, "Indeed", new_signals, seen_urls)
+                if not res: break
+        except Exception as e: logger.error(f"Indeed error: {e}")
 
-            for job in all_query_jobs:
-                url = job.get("share_link") or job.get("related_links", [{}])[0].get("link", "")
-                if not url or url in seen_urls:
-                    continue
-                seen_urls.add(url)
+        # --- ENGINE 3: HIRING CAFE (via Apify) ---
+        try:
+            run_input = { "searchQuery": query, "maxResults": 20 }
+            run = apify_client.actor("manojachari/hiring-cafe-scraper").call(run_input=run_input)
+            for job in apify_client.dataset(run["defaultDatasetId"]).iterate_items():
+                url = job.get("applyUrl") or job.get("url")
+                if url and url not in seen_urls:
+                    # Hiring Cafe has slightly different field names
+                    job['title'] = job.get('jobTitle', job.get('title'))
+                    job['company_name'] = job.get('companyName', job.get('company'))
+                    process_and_add_job(job, url, "Hiring Cafe", new_signals, seen_urls)
+        except Exception as e: logger.error(f"Hiring Cafe error: {e}")
 
-                title = job.get("title", "")
-                company = extract_company(job)
-                location = job.get("location", "")
-                description = job.get("description", "")[:500]
-                date_posted = job.get("detected_extensions", {}).get("posted_at", "")
-
-                full_text = f"{title} {company} {location} {description}"
-                industry = detect_industry(full_text)
-                region = detect_region(location + " " + full_text)
-
-                detail = f"{title} role at {company}."
-                if location:
-                    detail += f" Based in {location}."
-                if description:
-                    first_sentence = description.split(".")[0].strip()
-                    if len(first_sentence) > 20:
-                        detail += f" {first_sentence}."
-
-                signal = {
-                    "company": company,
-                    "job_title": title,
-                    "industry": industry,
-                    "region": region,
-                    "signal_type": "role",
-                    "detail": detail,
-                    "contact": "See job posting",
-                    "source_url": url,
-                    "source": "Google Jobs",
-                    "location": location,
-                    "date_posted": date_posted,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                }
-                new_signals.append(signal)
-
-        except Exception as e:
-            logger.error(f"Error on query '{query}': {e}")
-            continue
-
+    # 3. Batch Save
     if new_signals:
         try:
             supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
-            logger.info(f"Saved {len(new_signals)} signals to Supabase")
-        except Exception as e:
-            logger.error(f"Error saving to Supabase: {e}")
-    else:
-        logger.info("No new signals found")
-
+            logger.info(f"Saved {len(new_signals)} signals total.")
+        except Exception as e: logger.error(f"Supabase save error: {e}")
+    
     return len(new_signals)
 
+def process_and_add_job(job, url, source_name, signal_list, seen_set):
+    """Helper to clean data and add to the list"""
+    title = job.get("title", "Unknown Role")
+    company = extract_company(job)
+    location = job.get("location", "Remote/USA")
+    description = job.get("description", "")[:500]
+    
+    full_text = f"{title} {company} {description}"
+    industry = detect_industry(full_text)
+    region = detect_region(location + " " + full_text)
+
+    signal_list.append({
+        "company": company,
+        "job_title": title,
+        "industry": industry,
+        "region": region,
+        "signal_type": "role",
+        "detail": f"{title} at {company} ({source_name}).",
+        "source_url": url,
+        "source": source_name,
+        "location": location,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    seen_set.add(url)
 
 @app.route("/", methods=["GET"])
 def health():
