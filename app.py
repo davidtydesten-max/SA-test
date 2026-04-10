@@ -216,10 +216,14 @@ def get_signals():
 @app.route("/refresh", methods=["GET", "POST"])
 def manual_refresh():
     try:
-        count = scrape_jobs()
-        return jsonify({"status": "ok", "new_signals": count})
+        # This tells the scheduler to run the scrape_jobs function immediately
+        scheduler.add_job(scrape_jobs, 'date', run_date=datetime.now(timezone.utc))
+        return jsonify({
+            "status": "ok", 
+            "message": "Scraper started in background. Check back in 2-3 minutes for updates."
+        })
     except Exception as e:
-        logger.error(f"Error during manual refresh: {e}")
+        logger.error(f"Error starting background refresh: {e}")
         return jsonify({"error": str(e)}), 500
 
 scheduler = BackgroundScheduler()
