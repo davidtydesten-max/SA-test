@@ -2,7 +2,6 @@ import os
 import re
 import time
 import logging
-import requests
 from datetime import datetime, timezone, timedelta
 from serpapi import GoogleSearch
 from supabase import create_client, Client
@@ -35,40 +34,12 @@ SEARCH_QUERIES = [
     "OneStream finance transformation jobs"
 ]
 
-# Intelligence Mappings - Updated for National Scope
-INDUSTRY_MAP = {
-    "bank": "Financial Services", "financial": "Financial Services", "insurance": "Insurance",
-    "capital": "Financial Services", "investment": "Financial Services", "asset": "Financial Services",
-    "pharma": "Life Sciences", "biotech": "Life Sciences", "health": "Healthcare",
-    "medical": "Healthcare", "hospital": "Healthcare", "manufactur": "Manufacturing", 
-    "industrial": "Manufacturing", "tech": "Technology", "software": "Technology", 
-    "retail": "Retail", "consult": "Professional Services", "advisory": "Professional Services"
-}
-
-# Consolidated Region Map for Tri-State vs National
-TRISTATE_KEYWORDS = ["new york", "ny ", ", ny", "nyc", "new jersey", "nj ", ", nj", "connecticut", "ct ", ", ct"]
-REMOTE_KEYWORDS = ["remote", "work from home", "anywhere", "virtual", "home-based"]
-
-def detect_metadata(text, location):
+def detect_region(text, location):
     text_lower = (text + " " + location).lower()
-    
-    # Industry detection
-    industry = "Enterprise"
-    for k, v in INDUSTRY_MAP.items():
-        if k in text_lower:
-            industry = v
-            break
-            
-    # Region detection - Prioritizing Tri-State vs National
-    region = "National"
-    if any(keyword in text_lower for keyword in TRISTATE_KEYWORDS):
-        region = "Tri-State (NY/NJ/CT)"
-    elif any(keyword in text_lower for keyword in REMOTE_KEYWORDS):
-        region = "Remote"
-    else:
-        region = "National / US"
-        
-    return industry, region
+    remote_keywords = ["remote", "virtual", "home-based", "anywhere", "work from home"]
+    if any(k in text_lower for k in remote_keywords):
+        return "Remote"
+    return "US National"
 
 def parse_relative_date(text):
     now = datetime.now(timezone.utc)
@@ -85,20 +56,16 @@ def parse_relative_date(text):
 def process_and_add_job(job, url, source_name, signal_list, seen_set):
     clean_url = url.split('?')[0].split('#')[0].strip()
     if clean_url in seen_set: return
-
     title = job.get("title", "Unknown Role").strip()
     company = job.get("company_name", "View Listing").strip()
     location = job.get("location", "USA")
-    
     raw_date = job.get("detected_extensions", {}).get("posted_at") or job.get("date")
     posted_at = parse_relative_date(raw_date)
-    
-    industry, region = detect_metadata(title + " " + job.get("description", ""), location)
-
+    region = detect_region(title + " " + job.get("description", ""), location)
     signal_list.append({
         "company": company,
         "job_title": title,
-        "industry": industry,
+        "industry": "Enterprise",
         "region": region,
         "signal_type": "role",
         "detail": f"{title} at {company} ({source_name}).",
@@ -111,27 +78,27 @@ def process_and_add_job(job, url, source_name, signal_list, seen_set):
     seen_set.add(clean_url)
 
 def scrape_jobs():
-    logger.info("Starting scrape...")
+    logger.info("Starting weekly scrape sequence...")
     new_signals = []
     seen_urls = set()
     try:
         existing = supabase.table("signals").select("source_url").limit(5000).execute()
         seen_urls = {r["source_url"] for r in existing.data if r.get("source_url")}
-    except: pass
+    except Exception as e:
+        logger.error(f"DB sync error: {e}")
 
     for query in SEARCH_QUERIES:
-        # Google Jobs
         try:
+            # 1. Google Jobs
             search = GoogleSearch({"engine": "google_jobs", "q": query, "api_key": SERPAPI_KEY, "hl": "en", "gl": "us"})
             for job in search.get_dict().get("jobs_results", []):
                 url = job.get("related_links", [{}])[0].get("link") or job.get("share_link")
                 if url: process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
-        except: pass
-
-        # Organic
-        try:
-            search = GoogleSearch({"engine": "google", "q": f"{query} site:indeed.com OR site:hiring.cafe", "api_key": SERPAPI_KEY, "gl": "us"})
-            for result in search.get_dict().get("organic_results", []):
+            
+            # 2. Organic (Indeed/HiringCafe)
+            # site: filter is efficient for credits
+            search_org = GoogleSearch({"engine": "google", "q": f"{query} site:indeed.com OR site:hiring.cafe", "api_key": SERPAPI_KEY, "gl": "us", "num": 5})
+            for result in search_org.get_dict().get("organic_results", []):
                 url = result.get("link")
                 if "indeed.com" in url or "hiring.cafe" in url:
                     snippet = result.get("snippet", "")
@@ -144,23 +111,27 @@ def scrape_jobs():
                         "description": snippet
                     }
                     process_and_add_job(job_data, url, "Indeed/HiringCafe", new_signals, seen_urls)
-        except: pass
-        time.sleep(1)
+        except Exception as e:
+            logger.error(f"Search error: {e}")
+        time.sleep(2)
 
     if new_signals:
-        supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
-    return len(new_signals)
+        try:
+            supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
+            logger.info(f"Saved {len(new_signals)} weekly leads.")
+        except Exception as e:
+            logger.error(f"Upsert Error: {e}")
 
 @app.route("/dashboard")
 def dashboard():
     return render_template_string("""
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
         <title>SA Intelligence</title>
         <style>
             body { font-family: -apple-system, sans-serif; padding: 20px; background: #f4f7f6; color: #333; }
-            .container { max-width: 1200px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+            .container { max-width: 1100px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
             header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #eee; padding-bottom: 20px; margin-bottom: 20px; }
             button { background: #0066ff; color: white; border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer; font-weight: 600; }
             button:disabled { background: #aab; }
@@ -175,12 +146,12 @@ def dashboard():
     <body>
         <div class="container">
             <header>
-                <h1>OneStream National Dashboard</h1>
+                <h1>OneStream Weekly Lead Intelligence</h1>
                 <button id="refresh-btn" onclick="refreshSignals()">Refresh Signals</button>
             </header>
             <table>
                 <thead>
-                    <tr><th>Posted</th><th>Company</th><th>Job Role</th><th>Region</th><th>Source</th></tr>
+                    <tr><th>Posted Date</th><th>Company</th><th>Job Role</th><th>Classification</th><th>Source</th></tr>
                 </thead>
                 <tbody id="signals-body"></tbody>
             </table>
@@ -201,7 +172,7 @@ def dashboard():
             }
             async function refreshSignals() {
                 const btn = document.getElementById('refresh-btn');
-                btn.textContent = 'Scraping... please wait 30s'; btn.disabled = true;
+                btn.textContent = 'Scraping... wait 30s'; btn.disabled = true;
                 await fetch('/refresh', { method: 'POST' });
                 setTimeout(async () => { await loadSignals(); btn.textContent = 'Refresh Signals'; btn.disabled = false; }, 30000);
             }
@@ -222,10 +193,12 @@ def manual_refresh():
     return jsonify({"status": "ok"})
 
 @app.route("/")
-def health(): return "Application Live. Visit /dashboard"
+def health(): return "Visit /dashboard"
 
+# --- WEEKLY SCHEDULER ---
+# Runs every Monday at 7:00 AM
 scheduler = BackgroundScheduler()
-scheduler.add_job(scrape_jobs, "cron", hour=7, minute=0, timezone="America/New_York")
+scheduler.add_job(scrape_jobs, "cron", day_of_week="mon", hour=7, minute=0, timezone="America/New_York")
 scheduler.start()
 
 if __name__ == "__main__":
