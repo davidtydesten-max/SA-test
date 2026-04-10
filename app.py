@@ -85,12 +85,6 @@ def detect_region(text):
 def extract_company(result):
     return result.get("company_name") or result.get("detected_extensions", {}).get("company", "Unknown")
 
-from apify_client import ApifyClient
-
-# Add this near your other OS gets
-APIFY_TOKEN = os.environ.get("APIFY_TOKEN")
-apify_client = ApifyClient(APIFY_TOKEN)
-
 def scrape_jobs():
     logger.info(f"Starting multi-engine scrape at {datetime.now(timezone.utc)}")
     new_signals = []
@@ -103,7 +97,6 @@ def scrape_jobs():
         logger.warning(f"Could not fetch existing URLs: {e}")
 
     for query in SEARCH_QUERIES:
-        # --- ENGINE 1: GOOGLE JOBS ---
         try:
             token = None
             for page in range(3):
@@ -130,7 +123,6 @@ def scrape_jobs():
         except Exception as e:
             logger.error(f"Google error: {e}")
 
-        # --- ENGINE 2: INDEED ---
         try:
             for page in range(2):
                 params = {
@@ -149,13 +141,12 @@ def scrape_jobs():
         except Exception as e:
             logger.error(f"Indeed error: {e}")
 
-if new_signals:
-    try:
-        # The on_conflict="source_url" is the key to stopping duplicates
-        supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
-        logger.info(f"Saved {len(new_signals)} signals total.")
-    except Exception as e:
-        logger.error(f"Supabase save error: {e}")
+    if new_signals:
+        try:
+            supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
+            logger.info(f"Saved {len(new_signals)} signals total.")
+        except Exception as e:
+            logger.error(f"Supabase save error: {e}")
     
     return len(new_signals)
 
@@ -163,13 +154,9 @@ def process_and_add_job(job, url, source_name, signal_list, seen_set):
     title = job.get("title", "Unknown Role")
     company = extract_company(job)
     
-    # --- THIS IS STEP 4 ---
-    # We look through the list of jobs we JUST found in this scrape.
-    # If we already have a job with the same company AND title, we stop here.
     for existing_job in signal_list:
         if existing_job['company'] == company and existing_job['job_title'] == title:
-            return  # This exits the function so the job is NOT added to the list
-    # -----------------------
+            return 
 
     location = job.get("location", "Remote/USA")
     description = job.get("description", "")[:500]
@@ -197,37 +184,17 @@ def health():
     return jsonify({"status": "ok", "message": "SA Intelligence API running"})
 
 @app.route("/signals", methods=["GET"])
-def process_and_add_job(job, url, source_name, signal_list, seen_set):
-    # These lines must be indented 4 spaces
-    title = job.get("title", "Unknown Role")
-    company = extract_company(job)
-    
-    # Check for duplicates in the current list
-    for existing_job in signal_list:
-        if existing_job['company'] == company and existing_job['job_title'] == title:
-            return 
-
-    location = job.get("location", "Remote/USA")
-    description = job.get("description", "")[:500]
-    
-    full_text = f"{title} {company} {description}"
-    industry = detect_industry(full_text)
-    region = detect_region(location + " " + full_text)
-
-    # Adding the job to the list
-    signal_list.append({
-        "company": company,
-        "job_title": title,
-        "industry": industry,
-        "region": region,
-        "signal_type": "role",
-        "detail": f"{title} at {company} ({source_name}).",
-        "source_url": url,
-        "source": source_name,
-        "location": location,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    })
-    seen_set.add(url)
+def get_signals():
+    try:
+        result = supabase.table("signals") \
+            .select("*") \
+            .order("created_at", desc=True) \
+            .range(0, 1000) \
+            .execute()
+        return jsonify({"signals": result.data, "count": len(result.data)})
+    except Exception as e:
+        logger.error(f"Error fetching signals: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/refresh", methods=["POST"])
 def manual_refresh():
@@ -243,7 +210,5 @@ scheduler.add_job(scrape_jobs, "cron", hour=7, minute=0, timezone="America/New_Y
 scheduler.start()
 
 if __name__ == "__main__":
-    logger.info("Running initial scrape on startup...")
-    scrape_jobs()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
