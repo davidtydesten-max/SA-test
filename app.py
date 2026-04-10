@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timezone, timedelta
 from serpapi import GoogleSearch
 from supabase import create_client, Client
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, render_template_string
 from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -16,12 +16,14 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
+# Environment Variables
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
+# Updated Search Queries
 SEARCH_QUERIES = [
     "OneStream developer jobs USA",
     "OneStream consultant jobs United States",
@@ -70,12 +72,10 @@ def extract_company(result):
     return result.get("company_name") or result.get("detected_extensions", {}).get("company", "Unknown")
 
 def process_and_add_job(job, url, source_name, signal_list, seen_set):
-    # Normalize URL: Strip tracking parameters
     clean_url = url.split('?')[0].split('#')[0].strip()
     title = job.get("title", "Unknown Role").strip()
     company = extract_company(job).strip()
     
-    # Strict Deduplication
     if clean_url in seen_set:
         return
 
@@ -103,9 +103,7 @@ def process_and_add_job(job, url, source_name, signal_list, seen_set):
     seen_set.add(clean_url)
 
 def scrape_jobs():
-    logger.info("Starting master scrape (Google, Indeed, HiringCafe)...")
-    
-    # 1. Purge jobs older than 30 days
+    logger.info("Starting master scrape...")
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         supabase.table("signals").delete().lt("created_at", cutoff).execute()
@@ -116,7 +114,6 @@ def scrape_jobs():
     new_signals = []
     seen_urls = set()
 
-    # 2. Fetch existing URLs from Supabase to prevent duplicates
     try:
         existing = supabase.table("signals").select("source_url").limit(5000).execute()
         seen_urls = {r["source_url"] for r in existing.data if r.get("source_url")}
@@ -124,75 +121,51 @@ def scrape_jobs():
         logger.warning(f"Database sync warning: {e}")
 
     for query in SEARCH_QUERIES:
-      for query in SEARCH_QUERIES:
-        # --- Google Jobs ---
+        # 1. Google Jobs Engine (Broad)
         try:
             search = GoogleSearch({
-                "engine": "google",
+                "engine": "google_jobs",
                 "q": query,
                 "api_key": SERPAPI_KEY,
-                "gl": "us",
-                "hl": "en"
+                "hl": "en",
+                "gl": "us"
             })
             results = search.get_dict()
-            jobs_data = results.get("jobs_results", {})
-            jobs_list = jobs_data.get("jobs", []) if isinstance(jobs_data, dict) else jobs_data
-            for job in jobs_list:
-                url = job.get("link")
+            for job in results.get("jobs_results", []):
+                url = job.get("related_links", [{}])[0].get("link") or job.get("share_link")
                 if url:
                     process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
         except Exception as e:
-            logger.error(f"Google error: {e}")
+            logger.error(f"Google Jobs error: {e}")
 
-        # --- Indeed ---
-        try:
-            search = GoogleSearch({
-                "engine": "google",
-                "q": f"site:indeed.com {query}",
-                "api_key": SERPAPI_KEY,
-                "gl": "us",
-                "hl": "en"
-            })
-            results = search.get_dict()
-            for result in results.get("organic_results", []):
-                url = result.get("link")
-                if url and "indeed.com" in url:
-                    job = {
-                        "title": result.get("title", "").replace(" - Indeed.com", ""),
-                        "company_name": result.get("displayed_link", ""),
-                        "location": "United States",
-                        "description": result.get("snippet", "")
-                    }
-                    process_and_add_job(job, url, "Indeed", new_signals, seen_urls)
-        except Exception as e:
-            logger.error(f"Indeed error: {e}")
-
-        # --- HiringCafe ---
-        try:
-            search = GoogleSearch({
-                "engine": "google",
-                "q": f"site:hiring.cafe {query}",
-                "api_key": SERPAPI_KEY,
-                "gl": "us",
-                "hl": "en"
-            })
-            results = search.get_dict()
-            for result in results.get("organic_results", []):
-                url = result.get("link")
-                if url and "hiring.cafe" in url:
-                    job = {
-                        "title": result.get("title", ""),
-                        "company_name": result.get("displayed_link", ""),
-                        "location": "United States",
-                        "description": result.get("snippet", "")
-                    }
-                    process_and_add_job(job, url, "HiringCafe", new_signals, seen_urls)
-        except Exception as e:
-            logger.error(f"HiringCafe error: {e}")
+        # 2. Specifically targeting Indeed & HiringCafe via Organic Search
+        # We use a broader query here to help Google find the index pages
+        special_queries = [f"OneStream jobs on Indeed", f"OneStream hiring.cafe listings"]
+        for sq in special_queries:
+            try:
+                search = GoogleSearch({
+                    "engine": "google",
+                    "q": sq,
+                    "api_key": SERPAPI_KEY,
+                    "gl": "us"
+                })
+                results = search.get_dict()
+                for result in results.get("organic_results", []):
+                    url = result.get("link")
+                    source = "Indeed" if "indeed.com" in url else "HiringCafe" if "hiring.cafe" in url else None
+                    if source:
+                        job = {
+                            "title": result.get("title", "Job Posting"),
+                            "company_name": "Check listing",
+                            "location": "USA",
+                            "description": result.get("snippet", "")
+                        }
+                        process_and_add_job(job, url, source, new_signals, seen_urls)
+            except Exception as e:
+                logger.error(f"Organic search error: {e}")
 
         time.sleep(1)
 
-    # 3. Batch Upsert
     if new_signals:
         try:
             supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
@@ -204,22 +177,106 @@ def scrape_jobs():
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "message": "SA Intelligence Live"})
+    return jsonify({"status": "ok", "message": "SA Intelligence Live. Visit /dashboard to view leads."})
+
+@app.route("/dashboard")
+def dashboard():
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>SA Intelligence Dashboard</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; padding: 20px; background: #f4f7f6; color: #333; }
+            .container { max-width: 1100px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+            header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #f0f0f0; margin-bottom: 25px; padding-bottom: 15px; }
+            h1 { margin: 0; color: #1a1a1a; font-size: 24px; }
+            button { background: #0066ff; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: 600; transition: background 0.2s; }
+            button:hover { background: #0052cc; }
+            button:disabled { background: #aab; cursor: not-allowed; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+            th { text-align: left; padding: 15px; background: #fafafa; font-weight: 600; border-bottom: 2px solid #eee; }
+            td { padding: 15px; border-bottom: 1px solid #eee; vertical-align: top; }
+            tr:hover { background: #fcfcfc; }
+            .source-tag { background: #eff6ff; color: #1e40af; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; text-transform: uppercase; border: 1px solid #dbeafe; }
+            a { color: #0066ff; text-decoration: none; font-weight: 500; }
+            a:hover { text-decoration: underline; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <header>
+                <h1>OneStream & EPM Intelligence</h1>
+                <button id="refresh-btn" onclick="refreshSignals()">Refresh Signals</button>
+            </header>
+            <table id="signals-table">
+                <thead>
+                    <tr>
+                        <th style="width: 25%;">Company</th>
+                        <th style="width: 40%;">Job Role</th>
+                        <th style="width: 20%;">Region</th>
+                        <th style="width: 15%;">Source</th>
+                    </tr>
+                </thead>
+                <tbody id="signals-body">
+                    <tr><td colspan="4">Loading leads from database...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <script>
+            async function loadSignals() {
+                try {
+                    const response = await fetch('/signals');
+                    const data = await response.json();
+                    const body = document.getElementById('signals-body');
+                    body.innerHTML = '';
+                    if (!data.signals || data.signals.length === 0) {
+                        body.innerHTML = '<tr><td colspan="4">No leads found. Click refresh to start a scrape.</td></tr>';
+                        return;
+                    }
+                    data.signals.forEach(sig => {
+                        const row = `<tr>
+                            <td><strong>${sig.company}</strong></td>
+                            <td><a href="${sig.source_url}" target="_blank">${sig.job_title}</a></td>
+                            <td>${sig.region}</td>
+                            <td><span class="source-tag">${sig.source}</span></td>
+                        </tr>`;
+                        body.innerHTML += row;
+                    });
+                } catch (e) {
+                    console.error('Load error:', e);
+                }
+            }
+            async function refreshSignals() {
+                const btn = document.getElementById('refresh-btn');
+                btn.textContent = 'Scraping... Please Wait 30s';
+                btn.disabled = true;
+                try {
+                    await fetch('/refresh', { method: 'POST' });
+                    setTimeout(async () => {
+                        await loadSignals();
+                        btn.textContent = 'Refresh Signals';
+                        btn.disabled = false;
+                    }, 30000);
+                } catch(e) {
+                    alert('Refresh failed. Check Render logs.');
+                    btn.textContent = 'Refresh Signals';
+                    btn.disabled = false;
+                }
+            }
+            loadSignals();
+        </script>
+    </body>
+    </html>
+    """)
 
 @app.route("/signals", methods=["GET"])
 def get_signals():
     try:
-        # Override default Supabase limit
         query = supabase.table("signals").select("*").order("created_at", desc=True).limit(1000)
-        
-        region = request.args.get('region')
-        if region:
-            query = query.eq("region", region)
-            
         result = query.execute()
         return jsonify({"signals": result.data, "count": len(result.data)})
     except Exception as e:
-        logger.error(f"Fetch error: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/refresh", methods=["GET", "POST"])
