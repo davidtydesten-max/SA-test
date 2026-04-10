@@ -16,14 +16,12 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# Environment Variables
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# Updated Search Queries
 SEARCH_QUERIES = [
     "OneStream developer jobs USA",
     "OneStream consultant jobs United States",
@@ -74,7 +72,7 @@ def extract_company(result):
 def process_and_add_job(job, url, source_name, signal_list, seen_set):
     clean_url = url.split('?')[0].split('#')[0].strip()
     title = job.get("title", "Unknown Role").strip()
-    company = extract_company(job).strip()
+    company = job.get("company_name", "Unknown").strip()
     
     if clean_url in seen_set:
         return
@@ -107,7 +105,6 @@ def scrape_jobs():
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         supabase.table("signals").delete().lt("created_at", cutoff).execute()
-        logger.info("Stale jobs purged.")
     except Exception as e:
         logger.error(f"Cleanup error: {e}")
 
@@ -121,7 +118,7 @@ def scrape_jobs():
         logger.warning(f"Database sync warning: {e}")
 
     for query in SEARCH_QUERIES:
-        # 1. Google Jobs Engine (Broad)
+        # 1. Google Jobs
         try:
             search = GoogleSearch({
                 "engine": "google_jobs",
@@ -138,8 +135,7 @@ def scrape_jobs():
         except Exception as e:
             logger.error(f"Google Jobs error: {e}")
 
-        # 2. Specifically targeting Indeed & HiringCafe via Organic Search
-        # We use a broader query here to help Google find the index pages
+        # 2. Organic (Indeed/HiringCafe) with smarter company extraction
         special_queries = [f"OneStream jobs on Indeed", f"OneStream hiring.cafe listings"]
         for sq in special_queries:
             try:
@@ -152,32 +148,40 @@ def scrape_jobs():
                 results = search.get_dict()
                 for result in results.get("organic_results", []):
                     url = result.get("link")
-                    source = "Indeed" if "indeed.com" in url else "HiringCafe" if "hiring.cafe" in url else None
+                    snippet = result.get("snippet", "")
+                    title = result.get("title", "")
+                    
+                    source = None
+                    if "indeed.com" in url: source = "Indeed"
+                    elif "hiring.cafe" in url: source = "HiringCafe"
+                    
                     if source:
+                        # Attempting to find company name in the snippet (e.g., "at SystemsAccountants")
+                        company_match = re.search(r"(?:at|by|from)\s+([A-Z][\w\s&]+?)(?:\.|\s\d|\sin\s|\|)", snippet)
+                        extracted_company = company_match.group(1).strip() if company_match else "View Listing"
+                        
                         job = {
-                            "title": result.get("title", "Job Posting"),
-                            "company_name": "Check listing",
+                            "title": title.split(" | ")[0].split(" - ")[0],
+                            "company_name": extracted_company,
                             "location": "USA",
-                            "description": result.get("snippet", "")
+                            "description": snippet
                         }
                         process_and_add_job(job, url, source, new_signals, seen_urls)
             except Exception as e:
-                logger.error(f"Organic search error: {e}")
-
+                logger.error(f"Organic error: {e}")
         time.sleep(1)
 
     if new_signals:
         try:
             supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
-            logger.info(f"Saved {len(new_signals)} new unique signals.")
+            logger.info(f"Saved {len(new_signals)} leads.")
         except Exception as e:
             logger.error(f"Save error: {e}")
-    
     return len(new_signals)
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "message": "SA Intelligence Live. Visit /dashboard to view leads."})
+    return jsonify({"status": "ok", "message": "Visit /dashboard"})
 
 @app.route("/dashboard")
 def dashboard():
@@ -187,20 +191,16 @@ def dashboard():
     <head>
         <title>SA Intelligence Dashboard</title>
         <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; padding: 20px; background: #f4f7f6; color: #333; }
+            body { font-family: -apple-system, sans-serif; line-height: 1.6; padding: 20px; background: #f4f7f6; color: #333; }
             .container { max-width: 1100px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
             header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #f0f0f0; margin-bottom: 25px; padding-bottom: 15px; }
-            h1 { margin: 0; color: #1a1a1a; font-size: 24px; }
-            button { background: #0066ff; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: 600; transition: background 0.2s; }
-            button:hover { background: #0052cc; }
-            button:disabled { background: #aab; cursor: not-allowed; }
-            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-            th { text-align: left; padding: 15px; background: #fafafa; font-weight: 600; border-bottom: 2px solid #eee; }
-            td { padding: 15px; border-bottom: 1px solid #eee; vertical-align: top; }
-            tr:hover { background: #fcfcfc; }
-            .source-tag { background: #eff6ff; color: #1e40af; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; text-transform: uppercase; border: 1px solid #dbeafe; }
+            button { background: #0066ff; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+            button:disabled { background: #aab; }
+            table { width: 100%; border-collapse: collapse; }
+            th { text-align: left; padding: 15px; background: #fafafa; border-bottom: 2px solid #eee; }
+            td { padding: 15px; border-bottom: 1px solid #eee; }
+            .source-tag { background: #eff6ff; color: #1e40af; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; border: 1px solid #dbeafe; text-transform: uppercase; }
             a { color: #0066ff; text-decoration: none; font-weight: 500; }
-            a:hover { text-decoration: underline; }
         </style>
     </head>
     <body>
@@ -209,60 +209,43 @@ def dashboard():
                 <h1>OneStream & EPM Intelligence</h1>
                 <button id="refresh-btn" onclick="refreshSignals()">Refresh Signals</button>
             </header>
-            <table id="signals-table">
+            <table>
                 <thead>
                     <tr>
-                        <th style="width: 25%;">Company</th>
-                        <th style="width: 40%;">Job Role</th>
-                        <th style="width: 20%;">Region</th>
-                        <th style="width: 15%;">Source</th>
+                        <th>Company</th>
+                        <th>Job Role</th>
+                        <th>Region</th>
+                        <th>Source</th>
                     </tr>
                 </thead>
-                <tbody id="signals-body">
-                    <tr><td colspan="4">Loading leads from database...</td></tr>
-                </tbody>
+                <tbody id="signals-body"></tbody>
             </table>
         </div>
         <script>
             async function loadSignals() {
-                try {
-                    const response = await fetch('/signals');
-                    const data = await response.json();
-                    const body = document.getElementById('signals-body');
-                    body.innerHTML = '';
-                    if (!data.signals || data.signals.length === 0) {
-                        body.innerHTML = '<tr><td colspan="4">No leads found. Click refresh to start a scrape.</td></tr>';
-                        return;
-                    }
-                    data.signals.forEach(sig => {
-                        const row = `<tr>
-                            <td><strong>${sig.company}</strong></td>
-                            <td><a href="${sig.source_url}" target="_blank">${sig.job_title}</a></td>
-                            <td>${sig.region}</td>
-                            <td><span class="source-tag">${sig.source}</span></td>
-                        </tr>`;
-                        body.innerHTML += row;
-                    });
-                } catch (e) {
-                    console.error('Load error:', e);
-                }
+                const response = await fetch('/signals');
+                const data = await response.json();
+                const body = document.getElementById('signals-body');
+                body.innerHTML = '';
+                data.signals.forEach(sig => {
+                    body.innerHTML += `<tr>
+                        <td><strong>${sig.company}</strong></td>
+                        <td><a href="${sig.source_url}" target="_blank">${sig.job_title}</a></td>
+                        <td>${sig.region}</td>
+                        <td><span class="source-tag">${sig.source}</span></td>
+                    </tr>`;
+                });
             }
             async function refreshSignals() {
                 const btn = document.getElementById('refresh-btn');
                 btn.textContent = 'Scraping... Please Wait 30s';
                 btn.disabled = true;
-                try {
-                    await fetch('/refresh', { method: 'POST' });
-                    setTimeout(async () => {
-                        await loadSignals();
-                        btn.textContent = 'Refresh Signals';
-                        btn.disabled = false;
-                    }, 30000);
-                } catch(e) {
-                    alert('Refresh failed. Check Render logs.');
+                await fetch('/refresh', { method: 'POST' });
+                setTimeout(async () => {
+                    await loadSignals();
                     btn.textContent = 'Refresh Signals';
                     btn.disabled = false;
-                }
+                }, 30000);
             }
             loadSignals();
         </script>
@@ -272,20 +255,13 @@ def dashboard():
 
 @app.route("/signals", methods=["GET"])
 def get_signals():
-    try:
-        query = supabase.table("signals").select("*").order("created_at", desc=True).limit(1000)
-        result = query.execute()
-        return jsonify({"signals": result.data, "count": len(result.data)})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    result = supabase.table("signals").select("*").order("created_at", desc=True).limit(1000).execute()
+    return jsonify({"signals": result.data})
 
 @app.route("/refresh", methods=["GET", "POST"])
 def manual_refresh():
-    try:
-        scheduler.add_job(scrape_jobs, 'date', run_date=datetime.now(timezone.utc))
-        return jsonify({"status": "ok", "message": "Background scrape started."})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    scheduler.add_job(scrape_jobs, 'date', run_date=datetime.now(timezone.utc))
+    return jsonify({"status": "ok"})
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(scrape_jobs, "cron", hour=7, minute=0, timezone="America/New_York")
