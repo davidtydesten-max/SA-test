@@ -188,12 +188,12 @@ def health():
 
 @app.route("/signals", methods=["GET"])
 def get_signals():
-    try:
-    result = supabase.table("signals") \
-        .select("*") \
-        .order("created_at", desc=True) \
-        .range(0, 1000) \
-        .execute()
+try:
+        result = supabase.table("signals") \
+            .select("*") \
+            .order("created_at", desc=True) \
+            .range(0, 1000) \
+            .execute()
         return jsonify({"signals": result.data, "count": len(result.data)})
     except Exception as e:
         logger.error(f"Error fetching signals: {e}")
