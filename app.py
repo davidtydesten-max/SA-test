@@ -104,21 +104,26 @@ def scrape_jobs():
         logger.warning(f"Could not fetch existing URLs: {e}")
 
     for query in SEARCH_QUERIES:
-# --- ENGINE 1: GOOGLE JOBS ---
+# --- ENGINE 1: GOOGLE JOBS (Using Tokens for Pagination) ---
         try:
-            for page in range(0, 5): # Increased to 5 pages
+            next_page_token = None
+            for page in range(3):  # Fetch 3 pages
                 params = {
                     "engine": "google_jobs",
                     "q": query,
                     "api_key": SERPAPI_KEY,
-                    "start": page * 10,  # Ensure this is page * 10
-                    "num": 10,           # Explicitly set num per page
                     "country": "us"
                 }
+                if next_page_token:
+                    params["next_page_token"] = next_page_token
+
                 search = GoogleSearch(params)
                 results = search.get_dict()
-                res = results.get("jobs_results", [])
                 
+                # Update token for the next loop
+                next_page_token = results.get("serpapi_pagination", {}).get("next_page_token")
+                
+                res = results.get("jobs_results", [])
                 if not res:
                     break
                 
@@ -127,8 +132,8 @@ def scrape_jobs():
                     if url and url not in seen_urls:
                         process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
                 
-                # Small delay to ensure the API registers the next page request
-                time.sleep(0.5)
+                if not next_page_token:
+                    break  # No more pages available
         except Exception as e:
             logger.error(f"Google error: {e}")
 
