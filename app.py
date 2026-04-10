@@ -162,6 +162,15 @@ if new_signals:
 def process_and_add_job(job, url, source_name, signal_list, seen_set):
     title = job.get("title", "Unknown Role")
     company = extract_company(job)
+    
+    # --- THIS IS STEP 4 ---
+    # We look through the list of jobs we JUST found in this scrape.
+    # If we already have a job with the same company AND title, we stop here.
+    for existing_job in signal_list:
+        if existing_job['company'] == company and existing_job['job_title'] == title:
+            return  # This exits the function so the job is NOT added to the list
+    # -----------------------
+
     location = job.get("location", "Remote/USA")
     description = job.get("description", "")[:500]
     
