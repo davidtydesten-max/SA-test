@@ -102,7 +102,7 @@ def scrape_jobs():
                 "engine": "google_jobs",
                 "q": query,
                 "api_key": SERPAPI_KEY,
-                "num": 10,
+                "num": 50,
                 "country": "us",
             }
             search = GoogleSearch(params)
