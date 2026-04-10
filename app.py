@@ -124,37 +124,73 @@ def scrape_jobs():
         logger.warning(f"Database sync warning: {e}")
 
     for query in SEARCH_QUERIES:
+      for query in SEARCH_QUERIES:
         # --- Google Jobs ---
         try:
-            search = GoogleSearch({"engine": "google_jobs", "q": query, "api_key": SERPAPI_KEY, "country": "us"})
-            for job in search.get_dict().get("jobs_results", []):
-                url = job.get("share_link") or job.get("related_links", [{}])[0].get("link")
-                if url: process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
+            search = GoogleSearch({
+                "engine": "google",
+                "q": query,
+                "api_key": SERPAPI_KEY,
+                "gl": "us",
+                "hl": "en"
+            })
+            results = search.get_dict()
+            jobs_data = results.get("jobs_results", {})
+            jobs_list = jobs_data.get("jobs", []) if isinstance(jobs_data, dict) else jobs_data
+            for job in jobs_list:
+                url = job.get("link")
+                if url:
+                    process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
         except Exception as e:
             logger.error(f"Google error: {e}")
 
         # --- Indeed ---
         try:
-            search = GoogleSearch({"engine": "indeed", "q": query, "api_key": SERPAPI_KEY, "l": "United States"})
-            for job in search.get_dict().get("jobs_results", []):
-                url = job.get("link")
-                if url: process_and_add_job(job, url, "Indeed", new_signals, seen_urls)
+            search = GoogleSearch({
+                "engine": "google",
+                "q": f"site:indeed.com {query}",
+                "api_key": SERPAPI_KEY,
+                "gl": "us",
+                "hl": "en"
+            })
+            results = search.get_dict()
+            for result in results.get("organic_results", []):
+                url = result.get("link")
+                if url and "indeed.com" in url:
+                    job = {
+                        "title": result.get("title", "").replace(" - Indeed.com", ""),
+                        "company_name": result.get("displayed_link", ""),
+                        "location": "United States",
+                        "description": result.get("snippet", "")
+                    }
+                    process_and_add_job(job, url, "Indeed", new_signals, seen_urls)
         except Exception as e:
             logger.error(f"Indeed error: {e}")
 
-        # --- HiringCafe (Direct API Attempt) ---
+        # --- HiringCafe ---
         try:
-            hc_response = requests.post(
-                "https://hiring.cafe/api/jobs/search", 
-                json={"query": query, "location": "USA"}, 
-                timeout=10
-            )
-            if hc_response.status_code == 200:
-                for job in hc_response.json().get("jobs", []):
-                    url = job.get("apply_url")
-                    if url: process_and_add_job(job, url, "HiringCafe", new_signals, seen_urls)
+            search = GoogleSearch({
+                "engine": "google",
+                "q": f"site:hiring.cafe {query}",
+                "api_key": SERPAPI_KEY,
+                "gl": "us",
+                "hl": "en"
+            })
+            results = search.get_dict()
+            for result in results.get("organic_results", []):
+                url = result.get("link")
+                if url and "hiring.cafe" in url:
+                    job = {
+                        "title": result.get("title", ""),
+                        "company_name": result.get("displayed_link", ""),
+                        "location": "United States",
+                        "description": result.get("snippet", "")
+                    }
+                    process_and_add_job(job, url, "HiringCafe", new_signals, seen_urls)
         except Exception as e:
             logger.error(f"HiringCafe error: {e}")
+
+        time.sleep(1)
 
     # 3. Batch Upsert
     if new_signals:
