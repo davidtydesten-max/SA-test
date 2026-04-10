@@ -104,50 +104,62 @@ def scrape_jobs():
         logger.warning(f"Could not fetch existing URLs: {e}")
 
     for query in SEARCH_QUERIES:
-# --- ENGINE 1: GOOGLE JOBS (Using Tokens for Pagination) ---
+for query in SEARCH_QUERIES:
+        # --- ENGINE 1: GOOGLE JOBS (Token-based) ---
         try:
-            next_page_token = None
-            for page in range(3):  # Fetch 3 pages
+            token = None
+            for page in range(3):  # Fetch 3 pages per query
                 params = {
                     "engine": "google_jobs",
                     "q": query,
                     "api_key": SERPAPI_KEY,
                     "country": "us"
                 }
-                if next_page_token:
-                    params["next_page_token"] = next_page_token
-
+                if token:
+                    params["next_page_token"] = token
+                
                 search = GoogleSearch(params)
-                results = search.get_dict()
+                res_dict = search.get_dict()
                 
-                # Update token for the next loop
-                next_page_token = results.get("serpapi_pagination", {}).get("next_page_token")
+                # Get the token for the NEXT page
+                token = res_dict.get("serpapi_pagination", {}).get("next_page_token")
+                jobs = res_dict.get("jobs_results", [])
                 
-                res = results.get("jobs_results", [])
-                if not res:
+                if not jobs:
                     break
-                
-                for job in res:
+                    
+                for job in jobs:
                     url = job.get("share_link") or job.get("related_links", [{}])[0].get("link", "")
                     if url and url not in seen_urls:
                         process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
                 
-                if not next_page_token:
-                    break  # No more pages available
+                if not token: break # No more pages exist
         except Exception as e:
             logger.error(f"Google error: {e}")
 
-        # --- ENGINE 2: INDEED (via SerpApi) ---
+        # --- ENGINE 2: INDEED (Offset-based) ---
         try:
-            for page in range(2): # Getting 50 results
-                params = {"engine": "indeed", "q": query, "api_key": SERPAPI_KEY, "start": page * 25, "l": "United States"}
-                res = GoogleSearch(params).get_dict().get("jobs_results", [])
-                for job in res:
+            for page in range(2): # Getting 50 results (25 per page)
+                params = {
+                    "engine": "indeed",
+                    "q": query,
+                    "api_key": SERPAPI_KEY,
+                    "start": page * 25,
+                    "l": "United States"
+                }
+                search = GoogleSearch(params)
+                res_dict = search.get_dict()
+                jobs = res_dict.get("jobs_results", [])
+                
+                if not jobs:
+                    break
+                    
+                for job in jobs:
                     url = job.get("link")
                     if url and url not in seen_urls:
                         process_and_add_job(job, url, "Indeed", new_signals, seen_urls)
-                if not res: break
-        except Exception as e: logger.error(f"Indeed error: {e}")
+        except Exception as e:
+            logger.error(f"Indeed error: {e}")
 
         # --- ENGINE 3: HIRING CAFE (via Apify) ---
         try:
