@@ -197,17 +197,37 @@ def health():
     return jsonify({"status": "ok", "message": "SA Intelligence API running"})
 
 @app.route("/signals", methods=["GET"])
-def get_signals():
-try:
-        result = supabase.table("signals") \
-            .select("*") \
-            .order("created_at", desc=True) \
-            .range(0, 1000) \
-            .execute()
-        return jsonify({"signals": result.data, "count": len(result.data)})
-    except Exception as e:
-        logger.error(f"Error fetching signals: {e}")
-        return jsonify({"error": str(e)}), 500
+def process_and_add_job(job, url, source_name, signal_list, seen_set):
+    # These lines must be indented 4 spaces
+    title = job.get("title", "Unknown Role")
+    company = extract_company(job)
+    
+    # Check for duplicates in the current list
+    for existing_job in signal_list:
+        if existing_job['company'] == company and existing_job['job_title'] == title:
+            return 
+
+    location = job.get("location", "Remote/USA")
+    description = job.get("description", "")[:500]
+    
+    full_text = f"{title} {company} {description}"
+    industry = detect_industry(full_text)
+    region = detect_region(location + " " + full_text)
+
+    # Adding the job to the list
+    signal_list.append({
+        "company": company,
+        "job_title": title,
+        "industry": industry,
+        "region": region,
+        "signal_type": "role",
+        "detail": f"{title} at {company} ({source_name}).",
+        "source_url": url,
+        "source": source_name,
+        "location": location,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    seen_set.add(url)
 
 @app.route("/refresh", methods=["POST"])
 def manual_refresh():
