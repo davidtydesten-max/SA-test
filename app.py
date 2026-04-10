@@ -104,17 +104,33 @@ def scrape_jobs():
         logger.warning(f"Could not fetch existing URLs: {e}")
 
     for query in SEARCH_QUERIES:
-        # --- ENGINE 1: GOOGLE JOBS (via SerpApi) ---
+# --- ENGINE 1: GOOGLE JOBS ---
         try:
-            for page in range(3): # Getting 30 results
-                params = {"engine": "google_jobs", "q": query, "api_key": SERPAPI_KEY, "start": page * 10, "country": "us"}
-                res = GoogleSearch(params).get_dict().get("jobs_results", [])
+            for page in range(0, 5): # Increased to 5 pages
+                params = {
+                    "engine": "google_jobs",
+                    "q": query,
+                    "api_key": SERPAPI_KEY,
+                    "start": page * 10,  # Ensure this is page * 10
+                    "num": 10,           # Explicitly set num per page
+                    "country": "us"
+                }
+                search = GoogleSearch(params)
+                results = search.get_dict()
+                res = results.get("jobs_results", [])
+                
+                if not res:
+                    break
+                
                 for job in res:
                     url = job.get("share_link") or job.get("related_links", [{}])[0].get("link", "")
                     if url and url not in seen_urls:
                         process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
-                if not res: break
-        except Exception as e: logger.error(f"Google error: {e}")
+                
+                # Small delay to ensure the API registers the next page request
+                time.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Google error: {e}")
 
         # --- ENGINE 2: INDEED (via SerpApi) ---
         try:
