@@ -20,14 +20,15 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# Broadened keywords to catch hidden ads
+# Broadened queries for maximum coverage
 SEARCH_QUERIES = [
-    "OneStream",
-    "OneStream Consultant",
-    "OneStream Developer",
-    "OneStream Architect",
-    "OneStream EPM jobs",
-    "SystemsAccountants OneStream"
+    "OneStream developer",
+    "OneStream consultant",
+    "OneStream architect",
+    "OneStream administrator",
+    "OneStream implementation",
+    "OneStream EPM",
+    "OneStream CPM"
 ]
 
 def get_state(text, loc):
@@ -36,63 +37,61 @@ def get_state(text, loc):
     if any(c in zone for c in ["NY", "NEW YORK", "NYC"]): return "NY"
     if any(c in zone for c in ["NJ", "NEW JERSEY"]): return "NJ"
     if any(c in zone for c in ["CT", "CONNECTICUT"]): return "CT"
-    if any(c in zone for c in ["PA", "PENNSYLVANIA", "PHILLY"]): return "PA"
+    if any(c in zone for c in ["PA", "PENNSYLVANIA"]): return "PA"
     return "USA"
 
 def scrape_jobs():
-    logger.info("Starting Deep Scrape...")
+    logger.info("Starting Granular Scrape...")
     raw_results = []
     
+    # Iterate through queries and job types to bypass Google's result clustering
     for q in SEARCH_QUERIES:
-        # Loop through pages 0, 10, and 20 to get 30+ results per query
-        for page_offset in [0, 10, 20]:
-            try:
-                params = {
-                    "engine": "google_jobs",
-                    "q": q,
-                    "api_key": SERPAPI_KEY,
-                    "gl": "us",
-                    "hl": "en",
-                    "start": page_offset 
-                }
-                search = GoogleSearch(params)
-                res = search.get_dict()
-                jobs = res.get("jobs_results", [])
-                
-                if not jobs:
-                    break # Stop if a page comes back empty
+        for job_type in ["FULLTIME", "CONTRACTOR"]:
+            for page_offset in [0, 10]: # Check first two pages for each type
+                try:
+                    params = {
+                        "engine": "google_jobs",
+                        "q": q,
+                        "api_key": SERPAPI_KEY,
+                        "gl": "us",
+                        "hl": "en",
+                        "start": page_offset,
+                        "chips": f"employment_type:{job_type}" 
+                    }
+                    search = GoogleSearch(params)
+                    res = search.get_dict()
+                    jobs = res.get("jobs_results", [])
+                    
+                    if not jobs:
+                        break
 
-                for j in jobs:
-                    apply_links = j.get("apply_options", [])
-                    url = apply_links[0].get("link") if apply_links else j.get("share_link")
-                    if not url: continue
+                    for j in jobs:
+                        apply_links = j.get("apply_options", [])
+                        url = apply_links[0].get("link") if apply_links else j.get("share_link")
+                        if not url: continue
 
-                    raw_results.append({
-                        "company": j.get("company_name", "Unknown"),
-                        "job_title": j.get("title", "OneStream Role"),
-                        "region": get_state(j.get("title", "") + j.get("description", ""), j.get("location", "")),
-                        "source": j.get("via", "Google"),
-                        "source_url": url,
-                        "posted_at": datetime.now(timezone.utc).isoformat(),
-                        "signal_type": "role",
-                        "location": j.get("location", "USA"),
-                        "updated_at": datetime.now(timezone.utc).isoformat()
-                    })
-                time.sleep(1) # Ethical delay between pages
-            except Exception as e:
-                logger.error(f"Error on {q} page {page_offset}: {e}")
+                        raw_results.append({
+                            "company": j.get("company_name", "Unknown"),
+                            "job_title": j.get("title", "OneStream Role"),
+                            "region": get_state(j.get("title", "") + j.get("description", ""), j.get("location", "")),
+                            "source": j.get("via", "Google"),
+                            "source_url": url,
+                            "posted_at": datetime.now(timezone.utc).isoformat(),
+                            "signal_type": "role",
+                            "location": j.get("location", "USA"),
+                            "updated_at": datetime.now(timezone.utc).isoformat()
+                        })
+                    time.sleep(0.5) 
+                except Exception as e:
+                    logger.error(f"Error on {q} ({job_type}): {e}")
 
-    # Locally deduplicate by URL
-    unique_data = {}
-    for item in raw_results:
-        unique_data[item["source_url"]] = item
-    
+    unique_data = {item["source_url"]: item for item in raw_results}
     final_payload = list(unique_data.values())
 
     if final_payload:
         try:
             supabase.table("signals").upsert(final_payload, on_conflict="source_url").execute()
-            logger.info(f"Deep search complete. Synced {len(final_payload)} unique leads.")
+            logger.info(f"Granular search complete. Synced {len(final_payload)} unique leads.")
         except Exception as e:
             logger.error(f"Database sync error: {e}")
 
@@ -141,7 +140,7 @@ def dashboard():
                 `).join('');
             }
             async function update() {
-                alert("Deep search triggered. This may take up to 60 seconds.");
+                alert("Deep granular search triggered. This may take 60-90 seconds.");
                 await fetch('/refresh', {method:'POST'});
             }
             load();
@@ -153,7 +152,7 @@ def dashboard():
 
 @app.route("/signals")
 def get_signals():
-    res = supabase.table("signals").select("*").order("posted_at", desc=True).limit(200).execute()
+    res = supabase.table("signals").select("*").order("posted_at", desc=True).limit(300).execute()
     return jsonify(res.data)
 
 @app.route("/refresh", methods=["POST"])
