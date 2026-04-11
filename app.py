@@ -73,7 +73,6 @@ def scrape_engine(mode='jobs'):
     for q in queries:
         try:
             search_type = "google_jobs" if mode == 'jobs' else "google"
-            # Increased num to 20 to get more results
             params = {"engine": search_type, "q": q, "api_key": SERPAPI_KEY, "gl": "us", "num": 20}
             res = GoogleSearch(params).get_dict()
             
@@ -129,3 +128,80 @@ def dashboard():
             header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
             table { width: 100%; border-collapse: collapse; }
             th { text-align: left; font-size: 11px; color: #888; text-transform: uppercase; padding: 12px; background: #fafafa; }
+            td { padding: 15px; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
+            .btn { background: #1877f2; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+            .state-tag { background: #e7f3ff; color: #1877f2; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 800; }
+            .pending { color: #d93025; font-style: italic; }
+            a { text-decoration: none; color: #1877f2; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="tabs">
+                <button id="tab-role" class="tab active" onclick="switchTab('role')">Live Job Leads</button>
+                <button id="tab-install" class="tab" onclick="switchTab('install')">Verified Install Base</button>
+            </div>
+            <div class="content">
+                <header>
+                    <h2 id="title">Active Hiring Signals</h2>
+                    <button class="btn" onclick="refresh()">Run Market Update</button>
+                </header>
+                <table>
+                    <thead><tr><th>Date</th><th>Company</th><th>Role / Detail</th><th>State</th><th>Source</th></tr></thead>
+                    <tbody id="rows"></tbody>
+                </table>
+            </div>
+        </div>
+        <script>
+            let currentType = 'role';
+            async function load() {
+                const r = await fetch('/signals');
+                const d = await r.json();
+                const filtered = d.signals.filter(s => s.signal_type === currentType);
+                document.getElementById('rows').innerHTML = filtered.map(s => `
+                    <tr>
+                        <td style="color:#888">${new Date(s.posted_at).toLocaleDateString()}</td>
+                        <td class="${s.company === 'Company Name Pending' ? 'pending' : ''}"><strong>${s.company}</strong></td>
+                        <td>${s.job_title}</td>
+                        <td><span class="state-tag">${s.region}</span></td>
+                        <td><a href="${s.source_url}" target="_blank">View Link</a></td>
+                    </tr>
+                `).join('');
+            }
+            function switchTab(type) {
+                currentType = type;
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.getElementById('tab-' + type).classList.add('active');
+                document.getElementById('title').innerText = type === 'role' ? 'Active Hiring Signals' : 'Verified Install Base';
+                load();
+            }
+            async function refresh() {
+                alert("Scraping started. Please refresh in 60s.");
+                fetch('/refresh', {method:'POST'});
+            }
+            load();
+        </script>
+    </body>
+    </html>
+    """)
+
+@app.route("/signals")
+def get_signals():
+    res = supabase.table("signals").select("*").order("posted_at", desc=True).limit(500).execute()
+    return jsonify({"signals": res.data})
+
+@app.route("/refresh", methods=["POST"])
+def manual_refresh():
+    scheduler.add_job(scrape_engine, 'date', run_date=datetime.now(timezone.utc), args=['jobs'])
+    scheduler.add_job(scrape_engine, 'date', run_date=datetime.now(timezone.utc) + timedelta(seconds=15), args=['discovery'])
+    return jsonify({"status": "ok"})
+
+@app.route("/")
+def health(): return "Visit /dashboard"
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(lambda: scrape_engine('jobs'), "cron", day_of_week="mon", hour=7, minute=0)
+scheduler.start()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
