@@ -22,16 +22,11 @@ SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 SEARCH_QUERIES = [
-    "OneStream developer jobs", 
-    "OneStream consultant hiring", 
+    "OneStream developer", 
+    "OneStream consultant", 
     "OneStream architect", 
     "OneStream administrator",
-    "OneStream EPM implementation"
-]
-DISCOVERY_QUERIES = [
-    "OneStream implementation case study", 
-    "OneStream selects software", 
-    "OneStream customer success story"
+    "OneStream project"
 ]
 
 STATES = {'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD', 'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY'}
@@ -45,7 +40,6 @@ def get_state(text, loc):
             return code
     if any(city in search_zone for city in ["NYC", "MANHATTAN", "BROOKLYN", "ALBANY"]): return "NY"
     if any(city in search_zone for city in ["NEWARK", "JERSEY CITY", "TRENTON"]): return "NJ"
-    if any(city in search_zone for city in ["STAMFORD", "HARTFORD"]): return "CT"
     return "USA"
 
 def clean_company(job, snippet=""):
@@ -58,8 +52,8 @@ def clean_company(job, snippet=""):
         name = via.replace("via ", "").strip() if via else "Company Name Pending"
     return name
 
-def scrape_engine(mode='jobs'):
-    logger.info(f"Starting {mode} scrape")
+def scrape_jobs():
+    logger.info("Starting scrape")
     new_data = []
     seen_urls = set()
     
@@ -68,18 +62,14 @@ def scrape_engine(mode='jobs'):
         seen_urls = {r["source_url"] for r in res.data}
     except: pass
 
-    queries = SEARCH_QUERIES if mode == 'jobs' else DISCOVERY_QUERIES
-    
-    for q in queries:
+    for q in SEARCH_QUERIES:
         try:
-            search_type = "google_jobs" if mode == 'jobs' else "google"
-            params = {"engine": search_type, "q": q, "api_key": SERPAPI_KEY, "gl": "us", "num": 20}
+            params = {"engine": "google_jobs", "q": q, "api_key": SERPAPI_KEY, "gl": "us", "num": 20}
             res = GoogleSearch(params).get_dict()
-            
-            items = res.get("jobs_results", []) if mode == 'jobs' else res.get("organic_results", [])
+            items = res.get("jobs_results", [])
             
             for item in items:
-                url = item.get("related_links", [{}])[0].get("link") or item.get("link") or item.get("share_link")
+                url = item.get("related_links", [{}])[0].get("link") or item.get("share_link")
                 if not url: continue
                 url = url.split('?')[0].strip()
                 
@@ -87,29 +77,28 @@ def scrape_engine(mode='jobs'):
 
                 snippet = item.get("snippet", item.get("description", ""))
                 company = clean_company(item, snippet)
-                title = item.get("title", "OneStream Project")
+                title = item.get("title", "OneStream Role")
                 state = get_state(title + " " + snippet, item.get("location", "USA"))
 
                 new_data.append({
                     "company": company,
                     "job_title": title[:100],
                     "region": state,
-                    "source": "Google Jobs" if mode == 'jobs' else "Market Intel",
+                    "source": "Google Jobs",
                     "source_url": url,
                     "posted_at": datetime.now(timezone.utc).isoformat(),
-                    "signal_type": "role" if mode == 'jobs' else "install",
+                    "signal_type": "role",
                     "industry": "Enterprise", 
                     "location": item.get("location", "USA"), 
                     "updated_at": datetime.now(timezone.utc).isoformat()
                 })
                 seen_urls.add(url)
         except Exception as e:
-            logger.error(f"Error on query {q}: {e}")
+            logger.error(f"Error: {e}")
         time.sleep(1)
 
     if new_data:
         supabase.table("signals").upsert(new_data, on_conflict="source_url").execute()
-        logger.info(f"Saved {len(new_data)} items")
 
 @app.route("/dashboard")
 def dashboard():
@@ -117,15 +106,11 @@ def dashboard():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>SA Intelligence Hub</title>
+        <title>OneStream Lead Intel</title>
         <style>
             body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; margin: 0; padding: 20px; }
-            .container { max-width: 1240px; margin: auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
-            .tabs { display: flex; background: #f8f9fa; border-bottom: 1px solid #dee2e6; }
-            .tab { padding: 18px 28px; cursor: pointer; border: none; background: none; font-weight: 600; color: #65676b; }
-            .tab.active { color: #1877f2; border-bottom: 3px solid #1877f2; background: white; }
-            .content { padding: 30px; }
-            header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
+            .container { max-width: 1240px; margin: auto; background: white; border-radius: 12px; padding: 30px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+            header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; border-bottom: 1px solid #eee; padding-bottom: 15px; }
             table { width: 100%; border-collapse: collapse; }
             th { text-align: left; font-size: 11px; color: #888; text-transform: uppercase; padding: 12px; background: #fafafa; }
             td { padding: 15px; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
@@ -137,46 +122,31 @@ def dashboard():
     </head>
     <body>
         <div class="container">
-            <div class="tabs">
-                <button id="tab-role" class="tab active" onclick="switchTab('role')">Live Job Leads</button>
-                <button id="tab-install" class="tab" onclick="switchTab('install')">Verified Install Base</button>
-            </div>
-            <div class="content">
-                <header>
-                    <h2 id="title">Active Hiring Signals</h2>
-                    <button class="btn" onclick="refresh()">Run Market Update</button>
-                </header>
-                <table>
-                    <thead><tr><th>Date</th><th>Company</th><th>Role / Detail</th><th>State</th><th>Source</th></tr></thead>
-                    <tbody id="rows"></tbody>
-                </table>
-            </div>
+            <header>
+                <h2>OneStream Live Leads</h2>
+                <button class="btn" onclick="refresh()">Update Leads</button>
+            </header>
+            <table>
+                <thead><tr><th>Date</th><th>Company</th><th>Role</th><th>State</th><th>Source</th></tr></thead>
+                <tbody id="rows"></tbody>
+            </table>
         </div>
         <script>
-            let currentType = 'role';
             async function load() {
                 const r = await fetch('/signals');
                 const d = await r.json();
-                const filtered = d.signals.filter(s => s.signal_type === currentType);
-                document.getElementById('rows').innerHTML = filtered.map(s => `
+                document.getElementById('rows').innerHTML = d.signals.map(s => `
                     <tr>
                         <td style="color:#888">${new Date(s.posted_at).toLocaleDateString()}</td>
                         <td class="${s.company === 'Company Name Pending' ? 'pending' : ''}"><strong>${s.company}</strong></td>
                         <td>${s.job_title}</td>
                         <td><span class="state-tag">${s.region}</span></td>
-                        <td><a href="${s.source_url}" target="_blank">View Link</a></td>
+                        <td><a href="${s.source_url}" target="_blank">View Listing</a></td>
                     </tr>
                 `).join('');
             }
-            function switchTab(type) {
-                currentType = type;
-                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-                document.getElementById('tab-' + type).classList.add('active');
-                document.getElementById('title').innerText = type === 'role' ? 'Active Hiring Signals' : 'Verified Install Base';
-                load();
-            }
             async function refresh() {
-                alert("Scraping started. Please refresh in 60s.");
+                alert("Update started. Refresh in 60s.");
                 fetch('/refresh', {method:'POST'});
             }
             load();
@@ -192,15 +162,14 @@ def get_signals():
 
 @app.route("/refresh", methods=["POST"])
 def manual_refresh():
-    scheduler.add_job(scrape_engine, 'date', run_date=datetime.now(timezone.utc), args=['jobs'])
-    scheduler.add_job(scrape_engine, 'date', run_date=datetime.now(timezone.utc) + timedelta(seconds=15), args=['discovery'])
+    scheduler.add_job(scrape_jobs, 'date', run_date=datetime.now(timezone.utc))
     return jsonify({"status": "ok"})
 
 @app.route("/")
-def health(): return "Visit /dashboard"
+def health(): return "Use /dashboard"
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(lambda: scrape_engine('jobs'), "cron", day_of_week="mon", hour=7, minute=0)
+scheduler.add_job(scrape_jobs, "cron", day_of_week="mon", hour=7, minute=0)
 scheduler.start()
 
 if __name__ == "__main__":
