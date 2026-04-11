@@ -21,12 +21,15 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
+# Expanded queries to ensure we catch everything
 SEARCH_QUERIES = [
-    "OneStream developer", 
-    "OneStream consultant", 
-    "OneStream architect", 
-    "OneStream administrator",
-    "OneStream project"
+    "OneStream jobs",
+    "OneStream Consultant",
+    "OneStream Architect",
+    "OneStream Administrator",
+    "OneStream Developer",
+    "OneStream Analyst",
+    "OneStream implementation"
 ]
 
 STATES = {'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD', 'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY'}
@@ -53,10 +56,11 @@ def clean_company(job, snippet=""):
     return name
 
 def scrape_jobs():
-    logger.info("Starting scrape")
+    logger.info("Starting fresh scrape")
     new_data = []
     seen_urls = set()
     
+    # Still check for URLs currently in DB to avoid exact duplicates
     try:
         res = supabase.table("signals").select("source_url").execute()
         seen_urls = {r["source_url"] for r in res.data}
@@ -64,11 +68,16 @@ def scrape_jobs():
 
     for q in SEARCH_QUERIES:
         try:
-            params = {"engine": "google_jobs", "q": q, "api_key": SERPAPI_KEY, "gl": "us", "num": 20}
-            res = GoogleSearch(params).get_dict()
+            # num: 100 pulls way more results
+            params = {"engine": "google_jobs", "q": q, "api_key": SERPAPI_KEY, "gl": "us", "num": 100}
+            search = GoogleSearch(params)
+            res = search.get_dict()
             items = res.get("jobs_results", [])
             
+            logger.info(f"Query '{q}' found {len(items)} items")
+
             for item in items:
+                # Try multiple fields for a link
                 url = item.get("related_links", [{}])[0].get("link") or item.get("share_link")
                 if not url: continue
                 url = url.split('?')[0].strip()
@@ -84,21 +93,21 @@ def scrape_jobs():
                     "company": company,
                     "job_title": title[:100],
                     "region": state,
-                    "source": "Google Jobs",
+                    "source": item.get("via", "Google Jobs"),
                     "source_url": url,
                     "posted_at": datetime.now(timezone.utc).isoformat(),
                     "signal_type": "role",
-                    "industry": "Enterprise", 
-                    "location": item.get("location", "USA"), 
+                    "location": item.get("location", "USA"),
                     "updated_at": datetime.now(timezone.utc).isoformat()
                 })
                 seen_urls.add(url)
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Error on query {q}: {e}")
         time.sleep(1)
 
     if new_data:
         supabase.table("signals").upsert(new_data, on_conflict="source_url").execute()
+        logger.info(f"Successfully saved {len(new_data)} new leads.")
 
 @app.route("/dashboard")
 def dashboard():
@@ -146,7 +155,7 @@ def dashboard():
                 `).join('');
             }
             async function refresh() {
-                alert("Update started. Refresh in 60s.");
+                alert("Update started. Please wait 60 seconds and refresh page.");
                 fetch('/refresh', {method:'POST'});
             }
             load();
@@ -166,7 +175,7 @@ def manual_refresh():
     return jsonify({"status": "ok"})
 
 @app.route("/")
-def health(): return "Use /dashboard"
+def health(): return "Dashboard at /dashboard"
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(scrape_jobs, "cron", day_of_week="mon", hour=7, minute=0)
