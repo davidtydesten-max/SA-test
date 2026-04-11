@@ -15,24 +15,17 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# Connections
+# Credentials
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 SEARCH_QUERIES = [
-    "OneStream developer jobs USA",
-    "OneStream consultant jobs United States",
-    "OneStream architect jobs USA",
-    "OneStream EPM jobs USA",
-    "OneStream financial systems jobs",
-    "OneStream administrator jobs",
-    "CPM OneStream jobs",
-    "OneStream finance transformation"
+    "OneStream developer", "OneStream consultant", "OneStream architect", 
+    "OneStream EPM", "OneStream administrator", "CPM OneStream"
 ]
 
-# State lookup for extraction
 STATES = {
     'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA', 'Colorado': 'CO', 
     'Connecticut': 'CT', 'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID', 
@@ -46,104 +39,87 @@ STATES = {
     'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY'
 }
 
-def parse_date_safely(text):
+def parse_date(text):
     now = datetime.now(timezone.utc)
-    if not text or not isinstance(text, str): return now.isoformat()
+    if not text: return now.isoformat()
     text = text.lower()
     try:
-        num = re.search(r'(\d+)', text)
-        val = int(num.group(1)) if num else 1
-        if 'hour' in text: return (now - timedelta(hours=val)).isoformat()
-        if 'day' in text: return (now - timedelta(days=val)).isoformat()
-        if 'week' in text: return (now - timedelta(weeks=val)).isoformat()
-        if 'month' in text: return (now - timedelta(days=val*30)).isoformat()
+        num = int(re.search(r'(\d+)', text).group(1)) if re.search(r'(\d+)', text) else 1
+        if 'hour' in text: return (now - timedelta(hours=num)).isoformat()
+        if 'day' in text: return (now - timedelta(days=num)).isoformat()
+        if 'week' in text: return (now - timedelta(weeks=num)).isoformat()
     except: pass
     return now.isoformat()
 
-def detect_state(text, location):
-    combined = (text + " " + location).upper()
-    # Check for "Remote" first
-    if "REMOTE" in combined or "WORK FROM HOME" in combined:
-        return "Remote"
-    # Check for State Abbreviations (e.g., " NY", ", NY")
-    for full_name, abbrev in STATES.items():
-        if f" {abbrev}" in combined or f", {abbrev}" in combined or full_name.upper() in combined:
-            return abbrev
-    return "USA (National)"
+def get_state(text, loc):
+    combined = (str(text) + " " + str(loc)).upper()
+    if any(k in combined for k in ["REMOTE", "WORK FROM HOME", "VIRTUAL"]): return "Remote"
+    for name, code in STATES.items():
+        if f" {code}" in combined or f", {code}" in combined or name.upper() in combined:
+            return code
+    return "USA"
 
-def extract_company(job):
-    name = job.get("company_name")
-    if not name or name.lower() in ["view listing", "unmasked"]:
-        via = job.get("via", "")
-        if via.lower().startswith("via "):
-            name = via[4:].strip()
-    return name if name else "Company Unmasked"
+def clean_company(job_res, snippet=""):
+    # Priority 1: Google Jobs direct field
+    name = job_res.get("company_name")
+    # Priority 2: Extract from snippet (Indeed/Organic)
+    if not name or name.lower() in ["unmasked", "view listing"]:
+        match = re.search(r"(?:at|by|from)\s+([A-Z][\w\s&',.]+)", snippet)
+        if match: name = match.group(1).split("...")[0].strip()
+    # Priority 3: Via field
+    if not name:
+        via = job_res.get("via", "")
+        name = via.replace("via ", "").strip() if via else "Company Unknown"
+    return name
 
-def process_and_add_job(job, url, source_name, signal_list, seen_set):
-    clean_url = url.split('?')[0].split('#')[0].strip()
-    if clean_url in seen_set: return
-
-    title = job.get("title", "Unknown Role").strip()
-    company = extract_company(job)
-    location = job.get("location", "USA")
+def process_job(job, url, source, signals, seen):
+    link = url.split('?')[0].strip()
+    if link in seen: return
     
-    state = detect_state(title + " " + job.get("description", ""), location)
+    title = job.get("title", "OneStream Role")
+    snippet = job.get("snippet", job.get("description", ""))
+    company = clean_company(job, snippet)
+    loc = job.get("location", "USA")
     
-    raw_date = job.get("detected_extensions", {}).get("posted_at") or job.get("date")
-    posted_at = parse_date_safely(raw_date)
-
-    signal_list.append({
+    signals.append({
         "company": company,
         "job_title": title,
-        "industry": "Enterprise",
-        "region": state,
-        "signal_type": "role",
-        "detail": f"{title} at {company}.",
-        "source_url": clean_url,
-        "source": source_name,
-        "location": location,
-        "posted_at": posted_at,
-        "updated_at": datetime.now(timezone.utc).isoformat()
+        "region": get_state(title + " " + snippet, loc),
+        "source": source,
+        "source_url": link,
+        "posted_at": parse_date(job.get("detected_extensions", {}).get("posted_at") or job.get("date")),
+        "industry": "Enterprise", "signal_type": "role", "location": loc, "updated_at": datetime.now(timezone.utc).isoformat()
     })
-    seen_set.add(clean_url)
+    seen.add(link)
 
 def scrape_jobs():
-    logger.info("Weekly Scrape Initiated")
-    new_signals = []
-    seen_urls = set()
+    logger.info("Starting Scrape")
+    new_data, seen_urls = [], set()
     try:
-        existing = supabase.table("signals").select("source_url").limit(5000).execute()
-        seen_urls = {r["source_url"] for r in existing.data if r.get("source_url")}
+        obs = supabase.table("signals").select("source_url").execute()
+        seen_urls = {r["source_url"] for r in obs.data}
     except: pass
 
-    for query in SEARCH_QUERIES:
+    for q in SEARCH_QUERIES:
+        # Engine 1: Google Jobs (High Quality)
         try:
-            # 1. Google Jobs
-            search = GoogleSearch({"engine": "google_jobs", "q": query, "api_key": SERPAPI_KEY, "gl": "us"})
-            results = search.get_dict().get("jobs_results", [])
-            for job in results:
-                url = job.get("related_links", [{}])[0].get("link") or job.get("share_link")
-                if url: process_and_add_job(job, url, "Google Jobs", new_signals, seen_urls)
-            
-            # 2. Organic (Indeed)
-            search_org = GoogleSearch({"engine": "google", "q": f"{query} site:indeed.com", "api_key": SERPAPI_KEY, "gl": "us", "num": 5})
-            for res in search_org.get_dict().get("organic_results", []):
-                snippet = res.get("snippet", "")
-                co_match = re.search(r"(?:at|by|from)\s+([A-Z][\w\s&]+)", snippet)
-                job_data = {
-                    "title": res.get("title", "").split(" - ")[0],
-                    "company_name": co_match.group(1).strip() if co_match else "Unmasked",
-                    "date": "1 day ago",
-                    "location": "USA",
-                    "description": snippet
-                }
-                process_and_add_job(job_data, res.get("link"), "Indeed", new_signals, seen_urls)
-        except Exception as e:
-            logger.error(f"Error on {query}: {e}")
+            res = GoogleSearch({"engine": "google_jobs", "q": q, "api_key": SERPAPI_KEY, "gl": "us"}).get_dict()
+            for j in res.get("jobs_results", []):
+                u = j.get("related_links", [{}])[0].get("link") or j.get("share_link")
+                if u: process_job(j, u, "Google Jobs", new_data, seen_urls)
+        except: pass
+
+        # Engine 2: Organic (Indeed Focus)
+        try:
+            res = GoogleSearch({"engine": "google", "q": f"{q} site:indeed.com", "api_key": SERPAPI_KEY, "gl": "us", "num": 10}).get_dict()
+            for r in res.get("organic_results", []):
+                process_job(r, r.get("link"), "Indeed", new_data, seen_urls)
+        except: pass
         time.sleep(2)
 
-    if new_signals:
-        supabase.table("signals").upsert(new_signals, on_conflict="source_url").execute()
+    if new_data:
+        supabase.table("signals").upsert(new_data, on_conflict="source_url").execute()
+    logger.info(f"Done. Saved {len(new_data)}")
 
 @app.route("/dashboard")
 def dashboard():
@@ -151,30 +127,24 @@ def dashboard():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>SA Intel | OneStream</title>
+        <title>SystemsAccountants Intel</title>
         <style>
-            body { font-family: sans-serif; padding: 25px; background: #f0f2f5; color: #1c1e21; }
-            .card { max-width: 1200px; margin: auto; background: white; padding: 25px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-            header { display: flex; justify-content: space-between; border-bottom: 1px solid #ddd; padding-bottom: 15px; margin-bottom: 15px; }
-            button { background: #1877f2; color: white; border: none; padding: 10px 18px; border-radius: 5px; cursor: pointer; font-weight: bold; }
+            body { font-family: sans-serif; background: #f8f9fa; padding: 40px; }
+            .box { max-width: 1200px; margin: auto; background: #fff; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #eee; margin-bottom: 20px; padding-bottom: 10px; }
             table { width: 100%; border-collapse: collapse; }
-            th { text-align: left; padding: 12px; background: #f5f6f7; border-bottom: 1px solid #ddd; font-size: 12px; color: #606770; }
+            th { text-align: left; font-size: 12px; color: #666; text-transform: uppercase; padding: 12px; border-bottom: 2px solid #eee; }
             td { padding: 12px; border-bottom: 1px solid #eee; font-size: 14px; }
-            .date { color: #8d949e; font-size: 12px; }
-            .source-tag { background: #e7f3ff; color: #1877f2; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-            a { color: #1877f2; text-decoration: none; font-weight: bold; }
+            .st { background: #eef2ff; color: #4338ca; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
+            .src { color: #059669; font-weight: bold; font-size: 11px; }
+            a { color: #2563eb; text-decoration: none; font-weight: 600; }
         </style>
     </head>
     <body>
-        <div class="card">
-            <header>
-                <h2>OneStream National Intelligence</h2>
-                <button onclick="run()">Refresh Leads</button>
-            </header>
+        <div class="box">
+            <header><h2>OneStream National Leads</h2><button onclick="run()">Scrape Now</button></header>
             <table>
-                <thead>
-                    <tr><th>Posted</th><th>Company</th><th>Job Role</th><th>State/Region</th><th>Source</th></tr>
-                </thead>
+                <thead><tr><th>Date</th><th>Company</th><th>Role</th><th>State</th><th>Source</th></tr></thead>
                 <tbody id="rows"></tbody>
             </table>
         </div>
@@ -184,18 +154,15 @@ def dashboard():
                 const d = await r.json();
                 document.getElementById('rows').innerHTML = d.signals.map(s => `
                     <tr>
-                        <td class="date">${new Date(s.posted_at).toLocaleDateString()}</td>
+                        <td>${new Date(s.posted_at).toLocaleDateString()}</td>
                         <td><strong>${s.company}</strong></td>
                         <td><a href="${s.source_url}" target="_blank">${s.job_title}</a></td>
-                        <td>${s.region}</td>
-                        <td><span class="source-tag">${s.source}</span></td>
+                        <td><span class="st">${s.region}</span></td>
+                        <td><span class="src">${s.source}</span></td>
                     </tr>
                 `).join('');
             }
-            async function run() {
-                alert("Scrape in progress. Refresh page in 45 seconds.");
-                await fetch('/refresh', {method:'POST'});
-            }
+            async function run() { alert("Starting. Wait 60s."); fetch('/refresh',{method:'POST'}); }
             load();
         </script>
     </body>
@@ -213,7 +180,7 @@ def manual_refresh():
     return jsonify({"status": "ok"})
 
 @app.route("/")
-def health(): return "Dashboard at /dashboard"
+def health(): return "Visit /dashboard"
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(scrape_jobs, "cron", day_of_week="mon", hour=7, minute=0, timezone="America/New_York")
